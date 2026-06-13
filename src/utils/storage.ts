@@ -1,11 +1,84 @@
-import { PlayerProfile, AllStats, StatsStep, StatsCombo, StatsMismatch, StatsUrgent, StatsReputation } from '@/types';
-import { STATIONS, INITIAL_TRAIN } from '@/data/config';
+import {
+  PlayerProfile,
+  AllStats,
+  StatsStep,
+  StatsCombo,
+  StatsMismatch,
+  StatsUrgent,
+  StatsReputation,
+  Candy,
+  Train,
+  StationOrder,
+  Position,
+  DispatchResult,
+} from '@/types';
+import { STATIONS, INITIAL_TRAIN, GAME_CONFIG } from '@/data/config';
+import { createInitialBoard } from '@/engine/matchEngine';
+import { generateOrder } from '@/engine/contractSystem';
 
 const STORAGE_KEYS = {
   PROFILE: 'candy-train-profile',
   STATS: 'candy-train-stats',
   SETTINGS: 'candy-train-settings',
+  GAME_STATE: 'candy-train-game-state',
 };
+
+export interface PersistedGameState {
+  board: (Candy | null)[][];
+  train: Train;
+  currentOrder: StationOrder | null;
+  currentStationId: string;
+  score: number;
+  moves: number;
+  combo: number;
+  maxCombo: number;
+  gamePhase: 'playing' | 'dispatching' | 'result' | 'gameover';
+  dispatchResult: DispatchResult | null;
+  timestamp: number;
+}
+
+export function saveGameState(state: Omit<PersistedGameState, 'timestamp'>): void {
+  try {
+    const data: PersistedGameState = { ...state, timestamp: Date.now() };
+    localStorage.setItem(STORAGE_KEYS.GAME_STATE, JSON.stringify(data));
+  } catch (e) {
+    console.error('Failed to save game state:', e);
+  }
+}
+
+export function loadGameState(profile: PlayerProfile): PersistedGameState | null {
+  try {
+    const data = localStorage.getItem(STORAGE_KEYS.GAME_STATE);
+    if (data) {
+      const parsed = JSON.parse(data) as PersistedGameState;
+      const now = Date.now();
+      if (now - parsed.timestamp < 24 * 60 * 60 * 1000) {
+        return parsed;
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load game state:', e);
+  }
+
+  const stationId = profile.unlockedStations[0] || 'candy-town';
+  return {
+    board: createInitialBoard(),
+    train: JSON.parse(JSON.stringify(INITIAL_TRAIN)),
+    currentOrder: generateOrder(stationId, profile.reputation),
+    currentStationId: stationId,
+    score: 0,
+    moves: GAME_CONFIG.INITIAL_MOVES,
+    combo: 0,
+    maxCombo: 0,
+    gamePhase: 'playing',
+    dispatchResult: null,
+    timestamp: Date.now(),
+  };
+}
+
+export function clearGameState(): void {
+  localStorage.removeItem(STORAGE_KEYS.GAME_STATE);
+}
 
 const DEFAULT_PROFILE: PlayerProfile = {
   id: 'player-1',
@@ -198,10 +271,64 @@ export function checkUnlockedStations(reputation: number): string[] {
     .map(s => s.id);
 }
 
+export function recordDispatchStats(
+  movesUsed: number,
+  maxCombo: number,
+  mismatchCount: number,
+  penalty: number,
+  isUrgent: boolean,
+  urgentSuccess: boolean,
+  newReputation: number,
+  reputationChange: number
+): void {
+  recordStepStats(movesUsed);
+  recordComboStats(Math.max(1, maxCombo), maxCombo);
+  recordMismatchStats(mismatchCount, penalty);
+
+  if (isUrgent) {
+    recordUrgentStats(urgentSuccess);
+  } else {
+    const stats = loadStats();
+    const today = getTodayString();
+    const todayIndex = stats.urgents.findIndex(s => s.date === today);
+    if (todayIndex < 0) {
+      stats.urgents.unshift({
+        id: generateId(),
+        date: today,
+        urgentCount: 0,
+        successCount: 0,
+        successRate: 0,
+      });
+      saveStats(stats);
+    }
+  }
+
+  recordReputationStats(newReputation, reputationChange);
+
+  const stats = loadStats();
+  const today = getTodayString();
+
+  const mmIdx = stats.mismatches.findIndex(s => s.date === today);
+  if (mmIdx < 0) {
+    stats.mismatches.unshift({
+      id: generateId(),
+      date: today,
+      mismatchCount: 0,
+      totalPenalty: 0,
+      dispatches: 1,
+    });
+  } else {
+    stats.mismatches[mmIdx].dispatches += 1;
+  }
+
+  saveStats(stats);
+}
+
 export function resetAllData(): void {
   localStorage.removeItem(STORAGE_KEYS.PROFILE);
   localStorage.removeItem(STORAGE_KEYS.STATS);
   localStorage.removeItem(STORAGE_KEYS.SETTINGS);
+  localStorage.removeItem(STORAGE_KEYS.GAME_STATE);
 }
 
 export { DEFAULT_PROFILE, DEFAULT_STATS, INITIAL_TRAIN };

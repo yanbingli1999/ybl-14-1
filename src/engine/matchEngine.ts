@@ -96,9 +96,101 @@ export function swapCandies(board: (Candy | null)[][], pos1: Position, pos2: Pos
   return newBoard;
 }
 
+export function checkSwapHasSpecial(pos1: Position, pos2: Position, board: (Candy | null)[][]): {
+  hasSpecial: boolean;
+  specialPos: Position | null;
+  normalPos: Position | null;
+  specialType: SpecialCandyType;
+  normalType: CandyType | null;
+} {
+  const c1 = board[pos1.row]?.[pos1.col];
+  const c2 = board[pos2.row]?.[pos2.col];
+
+  if (!c1 || !c2) {
+    return { hasSpecial: false, specialPos: null, normalPos: null, specialType: null, normalType: null };
+  }
+
+  if (c1.isSpecial && !c2.isSpecial) {
+    return {
+      hasSpecial: true,
+      specialPos: pos1,
+      normalPos: pos2,
+      specialType: c1.specialType,
+      normalType: c2.type,
+    };
+  }
+
+  if (c2.isSpecial && !c1.isSpecial) {
+    return {
+      hasSpecial: true,
+      specialPos: pos2,
+      normalPos: pos1,
+      specialType: c2.specialType,
+      normalType: c1.type,
+    };
+  }
+
+  if (c1.isSpecial && c2.isSpecial) {
+    return {
+      hasSpecial: true,
+      specialPos: pos1,
+      normalPos: pos2,
+      specialType: 'rainbow',
+      normalType: null,
+    };
+  }
+
+  return { hasSpecial: false, specialPos: null, normalPos: null, specialType: null, normalType: null };
+}
+
+export function triggerSpecialCandy(
+  board: (Candy | null)[][],
+  specialPos: Position,
+  specialType: SpecialCandyType,
+  normalType: CandyType | null
+): MatchResult {
+  const positions: Position[] = [];
+  const candies: Candy[] = [];
+
+  if (specialType === 'bomb') {
+    const { row, col } = specialPos;
+    for (let r = row - 2; r <= row + 2; r++) {
+      for (let c = col - 2; c <= col + 2; c++) {
+        const dr = Math.abs(r - row);
+        const dc = Math.abs(c - col);
+        if (dr + dc <= 2 && r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
+          positions.push({ row: r, col: c });
+          const cdy = board[r][c];
+          if (cdy) candies.push(cdy);
+        }
+      }
+    }
+  }
+
+  if (specialType === 'rainbow') {
+    const targetType = normalType || BASIC_CANDY_TYPES[0];
+    for (let r = 0; r < BOARD_SIZE; r++) {
+      for (let c = 0; c < BOARD_SIZE; c++) {
+        const cdy = board[r][c];
+        if (cdy && (cdy.type === targetType || (cdy.isSpecial && cdy.specialType === 'bomb'))) {
+          positions.push({ row: r, col: c });
+          candies.push(cdy);
+        }
+      }
+    }
+  }
+
+  return {
+    candies,
+    positions,
+    matchType: 'special',
+    specialGenerated: null,
+    specialPosition: null,
+  };
+}
+
 export function findAllMatches(board: (Candy | null)[][]): MatchResult[] {
   const matches: MatchResult[] = [];
-  const matched = new Set<string>();
 
   for (let row = 0; row < BOARD_SIZE; row++) {
     let matchStart = 0;
@@ -117,7 +209,6 @@ export function findAllMatches(board: (Candy | null)[][]): MatchResult[] {
             positions.push({ row, col: c });
             const cdy = board[row][c];
             if (cdy) candies.push(cdy);
-            matched.add(`${row},${c}`);
           }
           let specialGenerated: SpecialCandyType = null;
           let specialPosition: Position | null = null;
@@ -149,7 +240,6 @@ export function findAllMatches(board: (Candy | null)[][]): MatchResult[] {
         positions.push({ row, col: c });
         const cdy = board[row][c];
         if (cdy) candies.push(cdy);
-        matched.add(`${row},${c}`);
       }
       let specialGenerated: SpecialCandyType = null;
       let specialPosition: Position | null = null;
@@ -187,7 +277,6 @@ export function findAllMatches(board: (Candy | null)[][]): MatchResult[] {
             positions.push({ row: r, col });
             const cdy = board[r][col];
             if (cdy) candies.push(cdy);
-            matched.add(`${r},${col}`);
           }
           let specialGenerated: SpecialCandyType = null;
           let specialPosition: Position | null = null;
@@ -219,7 +308,6 @@ export function findAllMatches(board: (Candy | null)[][]): MatchResult[] {
         positions.push({ row: r, col });
         const cdy = board[r][col];
         if (cdy) candies.push(cdy);
-        matched.add(`${r},${col}`);
       }
       let specialGenerated: SpecialCandyType = null;
       let specialPosition: Position | null = null;
@@ -253,66 +341,99 @@ export function findSpecialMatches(board: (Candy | null)[][], matches: MatchResu
     }
   }
 
-  for (let row = 0; row < BOARD_SIZE; row++) {
-    for (let col = 0; col < BOARD_SIZE; col++) {
-      const candy = board[row][col];
-      if (candy && candy.isSpecial && allMatchedPositions.has(`${row},${col}`)) {
-        if (candy.specialType === 'bomb') {
-          const positions: Position[] = [];
-          const candies: Candy[] = [];
-          for (let r = row - 1; r <= row + 1; r++) {
-            for (let c = col - 1; c <= col + 1; c++) {
-              if (r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
-                positions.push({ row: r, col: c });
-                const cdy = board[r][c];
-                if (cdy) candies.push(cdy);
-              }
-            }
-          }
-          specialMatches.push({
-            candies,
-            positions,
-            matchType: 'special',
-            specialGenerated: null,
-            specialPosition: null,
-          });
-        }
+  const processedSpecials = new Set<string>();
 
-        if (candy.specialType === 'rainbow') {
-          const positions: Position[] = [];
-          const candies: Candy[] = [];
-          let targetType: CandyType | null = null;
-          for (const match of matches) {
-            for (const pos of match.positions) {
-              if (pos.row === row && pos.col === col) continue;
-              const cdy = board[pos.row][pos.col];
-              if (cdy && !cdy.isSpecial) {
-                targetType = cdy.type;
-                break;
-              }
-            }
-            if (targetType) break;
-          }
+  for (const match of matches) {
+    for (const pos of match.positions) {
+      const adjacents = [
+        { row: pos.row - 1, col: pos.col },
+        { row: pos.row + 1, col: pos.col },
+        { row: pos.row, col: pos.col - 1 },
+        { row: pos.row, col: pos.col + 1 },
+        { row: pos.row, col: pos.col },
+      ];
 
-          if (targetType) {
-            for (let r = 0; r < BOARD_SIZE; r++) {
-              for (let c = 0; c < BOARD_SIZE; c++) {
-                const cdy = board[r][c];
-                if (cdy && cdy.type === targetType) {
+      for (const adj of adjacents) {
+        if (adj.row < 0 || adj.row >= BOARD_SIZE || adj.col < 0 || adj.col >= BOARD_SIZE) continue;
+        const key = `${adj.row},${adj.col}`;
+        if (processedSpecials.has(key)) continue;
+
+        const candy = board[adj.row][adj.col];
+        if (candy && candy.isSpecial) {
+          processedSpecials.add(key);
+
+          if (candy.specialType === 'bomb') {
+            const positions: Position[] = [];
+            const candies: Candy[] = [];
+            for (let r = adj.row - 2; r <= adj.row + 2; r++) {
+              for (let c = adj.col - 2; c <= adj.col + 2; c++) {
+                const dr = Math.abs(r - adj.row);
+                const dc = Math.abs(c - adj.col);
+                if (dr + dc <= 2 && r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE) {
                   positions.push({ row: r, col: c });
-                  candies.push(cdy);
+                  const cdy = board[r][c];
+                  if (cdy) candies.push(cdy);
                 }
               }
             }
+            specialMatches.push({
+              candies,
+              positions,
+              matchType: 'special',
+              specialGenerated: null,
+              specialPosition: null,
+            });
           }
 
-          specialMatches.push({
-            candies,
-            positions,
-            matchType: 'special',
-            specialGenerated: null,
-            specialPosition: null,
-          });
+          if (candy.specialType === 'rainbow') {
+            const positions: Position[] = [];
+            const candies: Candy[] = [];
+            let targetType: CandyType | null = null;
+
+            for (const m of matches) {
+              for (const p of m.positions) {
+                const cdy = board[p.row][p.col];
+                if (cdy && !cdy.isSpecial) {
+                  targetType = cdy.type;
+                  break;
+                }
+              }
+              if (targetType) break;
+            }
+
+            if (!targetType) {
+              for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                  const cdy = board[r][c];
+                  if (cdy && !cdy.isSpecial) {
+                    targetType = cdy.type;
+                    break;
+                  }
+                }
+                if (targetType) break;
+              }
+            }
+
+            if (targetType) {
+              for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                  const cdy = board[r][c];
+                  if (cdy && (cdy.type === targetType || (cdy.isSpecial && cdy.specialType === 'bomb'))) {
+                    positions.push({ row: r, col: c });
+                    candies.push(cdy);
+                  }
+                }
+              }
+            }
+
+            specialMatches.push({
+              candies,
+              positions,
+              matchType: 'special',
+              specialGenerated: null,
+              specialPosition: null,
+            });
+          }
         }
       }
     }
@@ -396,6 +517,17 @@ export function placeSpecialCandies(board: (Candy | null)[][], matches: MatchRes
       const { row, col } = match.specialPosition;
       if (newBoard[row][col] === null) {
         newBoard[row][col] = createSpecialCandy(row, col, match.specialGenerated);
+      } else {
+        for (let dr = -1; dr <= 1; dr++) {
+          for (let dc = -1; dc <= 1; dc++) {
+            const nr = row + dr;
+            const nc = col + dc;
+            if (nr >= 0 && nr < BOARD_SIZE && nc >= 0 && nc < BOARD_SIZE && newBoard[nr][nc] === null) {
+              newBoard[nr][nc] = createSpecialCandy(nr, nc, match.specialGenerated);
+              break;
+            }
+          }
+        }
       }
     }
   }
@@ -421,9 +553,13 @@ export function calculateScore(matches: MatchResult[], combo: number): number {
   let score = 0;
 
   for (const match of matches) {
-    const baseScore = match.candies.length * 10;
-    const lengthBonus = match.candies.length > 3 ? (match.candies.length - 3) * 20 : 0;
-    score += baseScore + lengthBonus;
+    if (match.matchType === 'special') {
+      score += match.candies.length * 15;
+    } else {
+      const baseScore = match.candies.length * 10;
+      const lengthBonus = match.candies.length > 3 ? (match.candies.length - 3) * 20 : 0;
+      score += baseScore + lengthBonus;
+    }
   }
 
   const comboMultiplier = 1 + combo * GAME_CONFIG.COMBO_BONUS_MULTIPLIER;
@@ -435,13 +571,23 @@ export function calculateScore(matches: MatchResult[], combo: number): number {
 export function hasValidMoves(board: (Candy | null)[][]): boolean {
   for (let row = 0; row < BOARD_SIZE; row++) {
     for (let col = 0; col < BOARD_SIZE; col++) {
+      const candy = board[row][col];
+
       if (col < BOARD_SIZE - 1) {
+        const right = board[row][col + 1];
+        if (candy?.isSpecial || right?.isSpecial) {
+          return true;
+        }
         const swapped = swapCandies(board, { row, col }, { row, col: col + 1 });
         if (findAllMatches(swapped).length > 0) {
           return true;
         }
       }
       if (row < BOARD_SIZE - 1) {
+        const below = board[row + 1][col];
+        if (candy?.isSpecial || below?.isSpecial) {
+          return true;
+        }
         const swapped = swapCandies(board, { row, col }, { row: row + 1, col });
         if (findAllMatches(swapped).length > 0) {
           return true;

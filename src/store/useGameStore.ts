@@ -8,7 +8,6 @@ import {
   DispatchResult,
   PlayerProfile,
   AllStats,
-  CandyType,
 } from '@/types';
 import {
   createInitialBoard,
@@ -23,6 +22,8 @@ import {
   placeSpecialCandies,
   countClearedCandies,
   calculateScore,
+  checkSwapHasSpecial,
+  triggerSpecialCandy,
 } from '@/engine/matchEngine';
 import { loadCandiesToTrain, clearTrain } from '@/engine/loadingSystem';
 import { calculateDispatchResult } from '@/engine/dispatchSystem';
@@ -31,14 +32,11 @@ import {
   loadProfile,
   saveProfile,
   loadStats,
-  recordStepStats,
-  recordComboStats,
-  recordMismatchStats,
-  recordUrgentStats,
-  recordReputationStats,
   checkUnlockedStations,
-  DEFAULT_PROFILE,
-  DEFAULT_STATS,
+  saveGameState,
+  loadGameState,
+  clearGameState,
+  recordDispatchStats,
 } from '@/utils/storage';
 import { INITIAL_TRAIN, GAME_CONFIG, STATIONS } from '@/data/config';
 
@@ -61,37 +59,53 @@ interface GameStore {
 
   selectCandy: (pos: Position) => void;
   processSwap: (pos1: Position, pos2: Position) => void;
-  processMatches: () => Promise<void>;
+  processMatches: (forcedMatches?: MatchResult[]) => Promise<void>;
   dispatchTrain: () => void;
   nextOrder: () => void;
   resetGame: () => void;
   setShowStats: (show: boolean) => void;
   closeResult: () => void;
   changeStation: (stationId: string) => void;
+  persist: () => void;
 }
 
 const useGameStore = create<GameStore>((set, get) => {
   const initialProfile = loadProfile();
   const initialStats = loadStats();
-  const initialStationId = initialProfile.unlockedStations[0] || 'candy-town';
-  const initialOrder = generateOrder(initialStationId, initialProfile.reputation);
+  const persisted = loadGameState(initialProfile);
 
   return {
-    board: createInitialBoard(),
+    board: persisted?.board || createInitialBoard(),
     selectedCandy: null,
-    score: 0,
-    moves: GAME_CONFIG.INITIAL_MOVES,
-    combo: 0,
-    maxCombo: 0,
-    train: JSON.parse(JSON.stringify(INITIAL_TRAIN)),
-    currentOrder: initialOrder,
-    currentStationId: initialStationId,
+    score: persisted?.score ?? 0,
+    moves: persisted?.moves ?? GAME_CONFIG.INITIAL_MOVES,
+    combo: persisted?.combo ?? 0,
+    maxCombo: persisted?.maxCombo ?? 0,
+    train: persisted?.train || JSON.parse(JSON.stringify(INITIAL_TRAIN)),
+    currentOrder: persisted?.currentOrder,
+    currentStationId: persisted?.currentStationId || initialProfile.unlockedStations[0] || 'candy-town',
     isAnimating: false,
-    gamePhase: 'playing',
+    gamePhase: persisted?.gamePhase === 'result' ? 'playing' : (persisted?.gamePhase || 'playing'),
     dispatchResult: null,
     profile: initialProfile,
     stats: initialStats,
     showStats: false,
+
+    persist: () => {
+      const s = get();
+      saveGameState({
+        board: s.board,
+        train: s.train,
+        currentOrder: s.currentOrder,
+        currentStationId: s.currentStationId,
+        score: s.score,
+        moves: s.moves,
+        combo: s.combo,
+        maxCombo: s.maxCombo,
+        gamePhase: s.gamePhase,
+        dispatchResult: s.dispatchResult,
+      });
+    },
 
     selectCandy: (pos: Position) => {
       const { selectedCandy, board, isAnimating, gamePhase } = get();
@@ -115,6 +129,30 @@ const useGameStore = create<GameStore>((set, get) => {
       const { board, moves, isAnimating, gamePhase } = get();
 
       if (isAnimating || gamePhase !== 'playing' || moves <= 0) return;
+
+      const specialInfo = checkSwapHasSpecial(pos1, pos2, board);
+
+      if (specialInfo.hasSpecial && specialInfo.specialPos && specialInfo.specialType) {
+        const newBoard = swapCandies(board, pos1, pos2);
+        const forced = triggerSpecialCandy(
+          newBoard,
+          specialInfo.specialPos,
+          specialInfo.specialType,
+          specialInfo.normalType
+        );
+
+        set({
+          board: newBoard,
+          moves: moves - 1,
+          combo: 0,
+          isAnimating: true,
+        });
+
+        setTimeout(() => {
+          get().processMatches([forced]);
+        }, 200);
+        return;
+      }
 
       const newBoard = swapCandies(board, pos1, pos2);
       const matches = findAllMatches(newBoard);
@@ -140,17 +178,25 @@ const useGameStore = create<GameStore>((set, get) => {
       }
     },
 
-    processMatches: async () => {
+    processMatches: async (initialMatches?: MatchResult[]) => {
       let currentBoard = get().board;
       let totalCombo = 0;
       let totalScore = 0;
       let allMatches: MatchResult[] = [];
 
-      const processOneRound = (): Promise<boolean> => {
+      const processOneRound = (roundIndex: number): Promise<boolean> => {
         return new Promise(resolve => {
-          let matches = findAllMatches(currentBoard);
-          const specialMatches = findSpecialMatches(currentBoard, matches);
-          matches = [...matches, ...specialMatches];
+          let matches: MatchResult[];
+
+          if (roundIndex === 0 && initialMatches && initialMatches.length > 0) {
+            matches = [...initialMatches];
+            const extraSpecials = findSpecialMatches(currentBoard, matches);
+            matches = [...matches, ...extraSpecials];
+          } else {
+            matches = findAllMatches(currentBoard);
+            const specialMatches = findSpecialMatches(currentBoard, matches);
+            matches = [...matches, ...specialMatches];
+          }
 
           if (matches.length === 0) {
             resolve(false);
@@ -187,8 +233,10 @@ const useGameStore = create<GameStore>((set, get) => {
 
       const runCascade = async () => {
         let hasMatches = true;
+        let round = 0;
         while (hasMatches) {
-          hasMatches = await processOneRound();
+          hasMatches = await processOneRound(round);
+          round++;
         }
 
         const candyCounts = countClearedCandies(allMatches);
@@ -204,10 +252,11 @@ const useGameStore = create<GameStore>((set, get) => {
           isAnimating: false,
         }));
 
+        get().persist();
+
         if (get().moves <= 0) {
           set({ gamePhase: 'gameover' });
-          recordStepStats(GAME_CONFIG.INITIAL_MOVES);
-          recordComboStats(totalCombo, newMaxCombo);
+          clearGameState();
         }
       };
 
@@ -215,13 +264,14 @@ const useGameStore = create<GameStore>((set, get) => {
     },
 
     dispatchTrain: () => {
-      const { train, currentOrder, profile, gamePhase } = get();
+      const { train, currentOrder, profile, gamePhase, moves, maxCombo } = get();
 
       if (gamePhase !== 'playing' || !currentOrder) return;
 
       const result = calculateDispatchResult(train, currentOrder);
 
       let newCoins = profile.coins + result.reward - result.penalty;
+      newCoins = Math.max(0, newCoins);
       let newReputation = profile.reputation + result.reputationChange;
       newReputation = Math.max(0, newReputation);
 
@@ -237,15 +287,17 @@ const useGameStore = create<GameStore>((set, get) => {
 
       saveProfile(newProfile);
 
-      if (currentOrder.isUrgent) {
-        recordUrgentStats(result.success);
-      }
-
-      if (result.mismatches.length > 0) {
-        recordMismatchStats(result.mismatches.length, result.penalty);
-      }
-
-      recordReputationStats(newReputation, result.reputationChange);
+      const movesUsed = GAME_CONFIG.INITIAL_MOVES - moves;
+      recordDispatchStats(
+        Math.max(1, movesUsed),
+        Math.max(1, maxCombo),
+        result.mismatches.length,
+        result.penalty,
+        currentOrder.isUrgent,
+        result.success,
+        newReputation,
+        result.reputationChange
+      );
 
       set({
         gamePhase: 'result',
@@ -253,6 +305,8 @@ const useGameStore = create<GameStore>((set, get) => {
         profile: newProfile,
         stats: loadStats(),
       });
+
+      clearGameState();
     },
 
     nextOrder: () => {
@@ -264,7 +318,14 @@ const useGameStore = create<GameStore>((set, get) => {
         currentOrder: newOrder,
         gamePhase: 'playing',
         dispatchResult: null,
+        board: createInitialBoard(),
+        score: 0,
+        moves: GAME_CONFIG.INITIAL_MOVES,
+        combo: 0,
+        maxCombo: 0,
       }));
+
+      get().persist();
     },
 
     resetGame: () => {
@@ -288,10 +349,17 @@ const useGameStore = create<GameStore>((set, get) => {
         profile,
         stats: loadStats(),
       });
+
+      clearGameState();
+      get().persist();
     },
 
     setShowStats: (show: boolean) => {
-      set({ showStats: show });
+      if (show) {
+        set({ showStats: show, stats: loadStats() });
+      } else {
+        set({ showStats: show });
+      }
     },
 
     closeResult: () => {
@@ -311,6 +379,8 @@ const useGameStore = create<GameStore>((set, get) => {
         currentOrder: newOrder,
         train: clearTrain(state.train),
       }));
+
+      get().persist();
     },
   };
 });
